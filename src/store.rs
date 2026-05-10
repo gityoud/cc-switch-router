@@ -902,17 +902,18 @@ impl AppStore {
         verify_signature(&installation.public_key, &input)?;
 
         let normalized_share = if let Some(mut share) = input.share.clone() {
-            let existing_owner_email = {
+            let existing_owner_binding = {
                 let conn = self.conn.lock().await;
-                get_share_owner_email(&conn, &share.share_id)?
+                get_share_owner_binding(&conn, &share.share_id)?
             };
             let bound_owner_email = {
                 let conn = self.conn.lock().await;
                 require_installation_owner_email(&conn, &input.installation_id)?
             };
-            enforce_share_owner(
+            enforce_share_owner_for_installation(
                 &mut share,
-                existing_owner_email.as_deref(),
+                existing_owner_binding.as_ref(),
+                &input.installation_id,
                 &bound_owner_email,
             )?;
             Some(share)
@@ -1214,11 +1215,12 @@ impl AppStore {
             .unchecked_transaction()
             .map_err(|e| AppError::Internal(format!("begin share claim tx failed: {e}")))?;
         let mut share = input.share;
-        let existing_owner_email = get_share_owner_email(&tx, &share.share_id)?;
+        let existing_owner_binding = get_share_owner_binding(&tx, &share.share_id)?;
         let bound_owner_email = require_installation_owner_email(&tx, &input.installation_id)?;
-        enforce_share_owner(
+        enforce_share_owner_for_installation(
             &mut share,
-            existing_owner_email.as_deref(),
+            existing_owner_binding.as_ref(),
+            &input.installation_id,
             &bound_owner_email,
         )?;
         share.subdomain = subdomain;
@@ -1311,10 +1313,11 @@ impl AppStore {
                     let mut share = op.share.ok_or_else(|| {
                         AppError::BadRequest("share is required for upsert".into())
                     })?;
-                    let existing_owner_email = get_share_owner_email(&tx, &share.share_id)?;
-                    enforce_share_owner(
+                    let existing_owner_binding = get_share_owner_binding(&tx, &share.share_id)?;
+                    enforce_share_owner_for_installation(
                         &mut share,
-                        existing_owner_email.as_deref(),
+                        existing_owner_binding.as_ref(),
+                        &input.installation_id,
                         &bound_owner_email,
                     )?;
                     upsert_share_tx(&tx, &input.installation_id, share)?;
@@ -4633,6 +4636,19 @@ fn get_share_owner_email(conn: &Connection, share_id: &str) -> Result<Option<Str
     .map_err(|e| AppError::Internal(format!("query share owner email failed: {e}")))
 }
 
+fn get_share_owner_binding(
+    conn: &Connection,
+    share_id: &str,
+) -> Result<Option<(String, Option<String>)>, AppError> {
+    conn.query_row(
+        "SELECT installation_id, owner_email FROM shares WHERE share_id = ?1",
+        params![share_id],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )
+    .optional()
+    .map_err(|e| AppError::Internal(format!("query share owner binding failed: {e}")))
+}
+
 fn find_share_claim_by_subdomain(
     conn: &Connection,
     subdomain: &str,
@@ -5517,6 +5533,23 @@ fn enforce_share_owner(
     Ok(())
 }
 
+fn enforce_share_owner_for_installation(
+    share: &mut ShareDescriptor,
+    existing_owner_binding: Option<&(String, Option<String>)>,
+    current_installation_id: &str,
+    current_user_email: &str,
+) -> Result<(), AppError> {
+    let existing_owner_email =
+        existing_owner_binding.and_then(|(existing_installation_id, owner_email)| {
+            if existing_installation_id == current_installation_id {
+                None
+            } else {
+                owner_email.as_deref()
+            }
+        });
+    enforce_share_owner(share, existing_owner_email, current_user_email)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -6399,6 +6432,87 @@ mod tests {
         assert_eq!(
             rows,
             vec![("share-new".into(), "inst-new".into(), "owner-sub".into())]
+        );
+
+        let _ = std::fs::remove_file(PathBuf::from(config.db_path));
+    }
+
+    #[tokio::test]
+    async fn claim_share_subdomain_heals_stale_owner_for_same_installation() {
+        let (store, config) = setup_store("signed-share-heal-owner").await;
+        let signing_key = insert_signed_installation(&store, "inst-heal").await;
+        insert_share(&store, "inst-heal", "share-heal", "heal-sub", "paused").await;
+        {
+            let conn = store.conn.lock().await;
+            conn.execute(
+                "UPDATE installations SET owner_email = ?2 WHERE id = ?1",
+                params!["inst-heal", "router@example.com"],
+            )
+            .expect("update installation owner");
+            conn.execute(
+                "UPDATE shares SET owner_email = ?2 WHERE share_id = ?1",
+                params!["share-heal", "free@example.com"],
+            )
+            .expect("update stale share owner");
+        }
+
+        let share = ShareDescriptor {
+            share_id: "share-heal".into(),
+            share_name: "router@example.com".into(),
+            owner_email: Some("router@example.com".into()),
+            shared_with_emails: vec![],
+            description: None,
+            for_sale: "No".into(),
+            subdomain: "heal-sub".into(),
+            share_token: "token-12345678".into(),
+            app_type: "proxy".into(),
+            provider_id: None,
+            token_limit: 1000,
+            parallel_limit: 3,
+            tokens_used: 0,
+            requests_count: 0,
+            share_status: "active".into(),
+            created_at: Utc::now().to_rfc3339(),
+            expires_at: (Utc::now() + Duration::hours(1)).to_rfc3339(),
+            support: ShareSupport::default(),
+            upstream_provider: None,
+            app_runtimes: ShareAppRuntimes::default(),
+        };
+
+        let timestamp_ms = Utc::now().timestamp_millis();
+        let nonce = Uuid::new_v4().to_string();
+        let signature = sign_test_payload(
+            &signing_key,
+            "inst-heal",
+            "share_claim_subdomain",
+            &share,
+            timestamp_ms,
+            &nonce,
+        );
+
+        store
+            .claim_share_subdomain(
+                &config,
+                ShareClaimSubdomainRequest {
+                    installation_id: "inst-heal".into(),
+                    timestamp_ms,
+                    nonce,
+                    signature,
+                    share,
+                },
+                ClientMetadata {
+                    ip: None,
+                    country_code: None,
+                },
+                "router@example.com",
+            )
+            .await
+            .expect("claim heals stale owner");
+
+        let conn = store.conn.lock().await;
+        assert_eq!(
+            get_share_owner_email(&conn, "share-heal").expect("share owner"),
+            Some("router@example.com".into())
         );
 
         let _ = std::fs::remove_file(PathBuf::from(config.db_path));
