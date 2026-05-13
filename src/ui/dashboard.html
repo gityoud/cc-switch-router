@@ -991,6 +991,17 @@
         font: 11px/1.35 "JetBrains Mono", monospace;
         color: var(--muted-foreground);
       }
+      .for-sale-market-all {
+        display: inline-flex;
+        width: fit-content;
+        align-items: center;
+        padding: 3px 8px;
+        border: 1px solid rgba(59,130,246,0.24);
+        border-radius: 999px;
+        background: rgba(59,130,246,0.08);
+        color: #2563eb;
+        font: 11px/1 "JetBrains Mono", monospace;
+      }
       .market-list {
         display: grid;
         gap: 8px;
@@ -3500,13 +3511,13 @@
         if (!share) return '<span class="meta">—</span>';
         const links = share.marketLinks || [];
         const showRuntimePricing = share.forSale === "Yes";
-        const marketLines = links
-          .map((market) => market.subdomain || "")
-          .filter(Boolean)
-          .map(escapeHtml);
-        if (share.marketAccessMode === "all") {
-          marketLines.unshift("All markets");
-        }
+        const allMarkets = share.marketAccessMode === "all";
+        const marketLines = allMarkets
+          ? []
+          : links
+              .map((market) => market.subdomain || "")
+              .filter(Boolean)
+              .map(escapeHtml);
         return `
           <div class="for-sale-market-stack">
             ${forSalePill(share)}
@@ -3516,6 +3527,9 @@
                   <div>Codex ${escapeHtml(upstreamSalePercent(share.appRuntimes?.codex))}</div>
                   <div>Gemini ${escapeHtml(upstreamSalePercent(share.appRuntimes?.gemini))}</div>
                 </div>`
+              : ""}
+            ${allMarkets
+              ? '<div><span class="for-sale-market-all" title="Authorized for every registered market, including future markets.">All markets</span></div>'
               : ""}
             ${marketLines.length
               ? `<div class="for-sale-market-list">${marketLines.map((line) => `<div>${line}</div>`).join("")}</div>`
