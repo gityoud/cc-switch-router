@@ -85,6 +85,19 @@ function formatUsdOneDecimal(value?: string | number) {
   return Number.isFinite(amount) ? `$${amount.toFixed(1)}` : "$0.0";
 }
 
+function formatUsdExactTrimmed(value?: string | number) {
+  if (value == null || value === "") return "";
+  const raw = String(value).trim();
+  const amount = Number(raw);
+  if (!Number.isFinite(amount)) return "";
+  if (amount === 0) return "$0";
+  const unsigned = raw.replace(/^\+/, "");
+  const normalized = unsigned.includes("e") || unsigned.includes("E")
+    ? amount.toFixed(12)
+    : unsigned;
+  return `$${normalized.replace(/(\.\d*?[1-9])0+$/, "$1").replace(/\.0+$/, "")}`;
+}
+
 function totalTokens(log?: Partial<ShareRequestLog | MarketRequestLog>) {
   return Number(log?.inputTokens || 0) + Number(log?.outputTokens || 0) + Number(log?.cacheReadTokens || 0) + Number(log?.cacheCreationTokens || 0);
 }
@@ -694,7 +707,7 @@ function MarketRequestLogs({ logs }: { logs: MarketRequestLog[] }) {
           <Card.Content className="gap-3 p-3">
             <div className="min-w-0">
               <div className="truncate font-medium">
-                {[log.userEmail || "-", log.shareSubdomain || log.shareId || "-", requestModelRoute(log), log.statusCode || log.status || "-", log.latencyMs ? `${log.latencyMs}ms` : "", `${compactTokens(totalTokens(log))} tokens`, formatUsdOneDecimal(log.usageAmountUsd)].filter(Boolean).join(" · ")}
+                {[log.userEmail || "-", log.shareSubdomain || log.shareId || "-", requestModelRoute(log), log.statusCode || log.status || "-", log.latencyMs ? `${log.latencyMs}ms` : "", `${compactTokens(totalTokens(log))} tokens`, formatUsdExactTrimmed(log.usageAmountUsd)].filter(Boolean).join(" · ")}
               </div>
               <div className="mt-1 flex flex-wrap gap-x-3 gap-y-1 text-xs text-muted-foreground">
                 <span title={formatDateTime(log.createdAt)}>{formatRelativeTime(log.createdAt)}</span>
